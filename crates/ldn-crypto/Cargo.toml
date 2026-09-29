@@ -1,0 +1,20 @@
+[package]
+name = "ldn-crypto"
+description = "Cryptography for the Nintendo Switch LDN protocol: key derivation, CCMP, AES-CTR/GCM, HMAC."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ldn-wire.workspace = true
+aes.workspace = true
+ccm.workspace = true
+ctr.workspace = true
+aes-gcm.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+
+[lints]
+workspace = true

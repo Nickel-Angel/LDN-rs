@@ -1,0 +1,15 @@
+[package]
+name = "ldn-proto"
+description = "Nintendo Switch LDN protocol messages: advertisement, challenge, authentication and disconnect frames."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ldn-wire.workspace = true
+ldn-crypto.workspace = true
+
+[lints]
+workspace = true

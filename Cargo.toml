@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ldn-wire", "crates/ldn-netlink", "crates/ldn-wlan"]
+members = ["crates/ldn-wire", "crates/ldn-crypto", "crates/ldn-proto", "crates/ldn-netlink", "crates/ldn-wlan"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,10 +12,19 @@ rust-version = "1.85"
 [workspace.dependencies]
 ldn-wire = { path = "crates/ldn-wire" }
 ldn-netlink = { path = "crates/ldn-netlink" }
+ldn-crypto = { path = "crates/ldn-crypto" }
+ldn-proto = { path = "crates/ldn-proto" }
 # 第三方依赖一律钉死版本，升级时显式改这里。
 tokio = { version = "=1.53.1", default-features = false }
 libc = "=0.2.189"
 log = "=0.4.34"
+# RustCrypto：纯 Rust、无 C 依赖，覆盖 AES-ECB/CTR/CCM/GCM、SHA-256、HMAC。
+aes = "=0.9.3"
+ccm = "=0.6.1"
+ctr = "=0.10.1"
+aes-gcm = "=0.11.1"
+sha2 = "=0.11.0"
+hmac = "=0.13.0"
 
 [workspace.lints.rust]
 # 只有 ldn-wlan 的 sys 模块需要系统调用，在那里局部放开；其余 crate 用 forbid 锁死。

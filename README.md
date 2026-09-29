@@ -11,6 +11,8 @@ LDN-rs/
 ├── Cargo.toml                 workspace；第三方依赖统一钉死版本
 ├── crates/
 │   ├── ldn-wire/              阶段 1：802.11 帧编解码，无 I/O，无第三方依赖
+│   ├── ldn-crypto/            阶段 2：密钥表与派生、CCMP、AES-CTR/GCM、SHA-256、HMAC（RustCrypto）
+│   ├── ldn-proto/             阶段 3：广播帧、挑战、LDN 认证帧、断开帧、NetworkInfo，无 I/O
 │   ├── ldn-netlink/           阶段 4a：netlink / genl / nl80211 / rtnetlink 编解码，无 I/O
 │   │   └── src/{message,nla,genl,nl80211,rtnl}.rs
 │   └── ldn-wlan/              阶段 4b：tokio I/O 层
@@ -23,6 +25,8 @@ LDN-rs/
 └── tools/
     ├── gen_python_vectors.py  帧编解码对拍向量
     ├── gen_netlink_vectors.py 驱动 wlan.py 真实代码路径，截获它发出的 netlink 消息
+    ├── gen_crypto_vectors.py  用假系统密钥调用 Python 的派生与加密方法
+    ├── gen_proto_vectors.py   用假系统密钥调用 Python 的协议类编码各类 LDN 帧
     └── requirements.txt
 ```
 
@@ -41,6 +45,8 @@ python3 -m venv .venv
 .venv/bin/pip install -r tools/requirements.txt
 .venv/bin/python tools/gen_python_vectors.py ../LDN
 .venv/bin/python tools/gen_netlink_vectors.py ../LDN
+.venv/bin/python tools/gen_crypto_vectors.py ../LDN
+.venv/bin/python tools/gen_proto_vectors.py ../LDN
 ```
 
 对拍向量的生成脚本和各 `tests/*parity*.rs` 里的输入必须逐字段一致，改一边就要改另一边。
@@ -51,8 +57,8 @@ python3 -m venv .venv
 | 阶段 | crate | 内容（对应 Python） | 验证方式 |
 |---|---|---|---|
 | 1 ✅ | `ldn-wire` | `wlan.py` 的帧与 IE 编解码、`streams.py` | 单元测试 + 19 组对拍 |
-| 2 | `ldn-crypto` | `KeyDerivation`、CCMP 加解密、广播帧 AES-CTR/GCM、挑战 HMAC | 假密钥对拍；`DATA_CCMP_ENCRYPTED` 已备好 |
-| 3 | `ldn-proto` | `NetworkInfo`、`AdvertisementFrame`、`Challenge*`、LDN `AuthenticationFrame`、`DisconnectFrame` | 对拍向量 |
+| 2 ✅ | `ldn-crypto` | `load_keys`、`KeyDerivation`、CCMP 加解密、广播帧 AES-CTR/GCM、认证帧 AES-GCM、挑战 HMAC | 协议 1/3 两套假密钥对拍 + CCMP 双向对拍 + 篡改/边界单测 |
+| 3 ✅ | `ldn-proto` | `NetworkId`、`NetworkInfo`、`AdvertisementFrame`（V1/V2 载荷，明文/CTR/GCM）、`Challenge*`、LDN `AuthenticationFrame`、`DisconnectFrame` | 18 组对拍（广播帧 4 种、认证帧 8 种）双向 + 篡改/边界单测 |
 | 4 ✅ | `ldn-netlink` + `ldn-wlan` | `wlan.py` 的 `Factory`/`Monitor`/`Tap`/`Station`/`AccessPoint` 与 python-netlink | 33 条 netlink 消息逐字节对拍；AP 状态机单测 + 对拍；真实内核 netlink 测试；硬件测试 `#[ignore]` |
 | 5 | `ldn` | `Scanner`、`STANetwork`、`APNetwork` 与 `scan`/`connect`/`create_network` | sans-IO 状态机单测；真机联调 Switch |
 
@@ -64,7 +70,8 @@ python3 -m venv .venv
   本来也只能这样做。依赖只有 `tokio`、`libc`、`log` 三个。
 - **异步清理：** 每个接口提供 `async fn close(self)`；忘记调用时 `Drop` 尽力发一条删除接口请求。STA/AP 请求都带
   `SOCKET_OWNER`，进程退出时内核也会自动断开连接、停止 AP。
-- **加密库（阶段 2 待定）：** 推荐 RustCrypto 系；`ring` 不提供 AES-CCM 和 AES-ECB。
+- **加密库：RustCrypto**（`aes`、`ccm`、`ctr`、`aes-gcm`、`sha2`、`hmac`，均钉死版本）。纯 Rust、无 C 依赖；`ring` 不提供 AES-CCM 和 AES-ECB。
+- **加密原语与帧格式分离：** `ldn-crypto` 只做“给定字节加解密”，广播帧/认证帧/挑战帧的格式留给 `ldn-proto`。
 
 ## 与 Python 版的有意差异
 
@@ -73,7 +80,12 @@ python3 -m venv .venv
 - `MacAddress` 是 `Copy` 值类型，没有 Python 版 dataclass 共享默认对象的问题。
 - 不加密时 `CONNECT` 不发 `NL80211_ATTR_PRIVACY`（python-netlink 的 flag 类型无论真假都编码成“存在”）。
 - 等待 `CONNECT` / `START_AP` 确认超过 10 秒报错，Python 版无限等待。
+- HMAC 校验用常数时间比较（Python 用 `!=`）；密钥文件格式错误时报告行号；`Keys`/`KeyDerivation` 的 `Debug` 不打印密钥值。
 - AP 的管理帧在 `AccessPoint::next_event` 里处理（Python 是独立后台任务），AP 运行期间必须持续调用它。
+- 广播帧 V2 编码要求已连接槽位数等于 `num_participants`，否则报错（Python 照写出对方无法解析的帧）；V1 解码时应用数据长度字段超过 384 报错（Python 静默截断）。
+- `ChallengeRequest` 解码按 64 项读取 params2（Python 只读 8 项，但编码写满 64 项）；参数个数超限报错。
+- LDN 认证帧是否加密统一由格式字段决定（Python 格式看“协议 == 1”、加密看“协议 == 3”，协议 1/3 以外会不一致）。
+- 名字、用户名超过 32 字节时报错（Python 会写出超长字段破坏帧格式）。
 - 同 ID 的 IE 出现多次时仍只保留最后一个，与 Python 版一致；这不符合 802.11（221 可以出现多次），等到需要解析 Vendor IE 时再改成 `Vec`。
 
 ## ldn-wire 主要接口
@@ -91,6 +103,35 @@ python3 -m venv .venv
 | `frame::Frame` | `parse(&[u8]) -> Result<Option<Frame>>`、`encode()` | monitor 口的帧分发；不认识的类型返回 `None` |
 | `data::DataFrame` | `encode()`、`decode()`、`ccmp_nonce() -> [u8;13]`、`ccmp_aad() -> [u8;22]` | 受保护帧只处理 CCMP 头，加解密由阶段 2 完成 |
 | `data::{SnapHeader, EthernetFrame}` | `encode()`、`decode()` | 数据面与 TAP 口的格式转换 |
+
+## ldn-crypto 主要接口
+
+| 类型 / 函数 | 说明 |
+|---|---|
+| `Keys::{parse, load, get, insert}` | `prod.keys` 文本（`名字 = 十六进制`），`Debug` 只显示密钥名 |
+| `Protocol::{V1, V3}` | 协议 1 用 `master_key_00`，协议 3 用 `master_key_12` |
+| `KeyDerivation::new(keys, protocol)` + `override_{advertise,data,challenge}_key` | 缺失的系统密钥在首次派生时报 `MissingKey` |
+| `derive_authentication_key(client_random)`、`derive_data_key(server_random, password)`、`derive_advertise_key(network_id_be)` | 返回 `[u8; 16]` |
+| `challenge_key(dev) -> &[u8]` | 固定 HMAC 密钥 `CHALLENGE_KEY` / `CHALLENGE_KEY_DEV` |
+| `cipher::{ccmp_encrypt, ccmp_decrypt}(&mut DataFrame, key, ...)` | 直接改 `ldn_wire::data::DataFrame`；失败时帧不变 |
+| `cipher::aes_ctr(key, nonce4, data)` | 加解密相同 |
+| `cipher::{gcm_seal, gcm_open}(key, nonce12, aad, ...)` | tag 单独返回/传入，调用方按帧格式摆放 |
+| `cipher::{sha256, hmac_sha256, hmac_sha256_verify}` | verify 为常数时间 |
+
+## ldn-proto 主要接口
+
+| 类型 | 主要方法 | 说明 |
+|---|---|---|
+| `NetworkId` | `encode(Endian)`、`decode(&[u8], Endian)`、`ssid_text()` | 广播帧里大端、认证帧里小端 |
+| `ParticipantInfo` | 字段：`ip_address`、`mac_address`、`connected`、`name`、`app_version`、`platform` | 名字最多 32 字节 |
+| `AdvertisementInfo` | 字段见文档；`participants: [ParticipantInfo; 8]` | 载荷；V1/V2 编码由 `format` 决定 |
+| `AdvertisementFrame` | `encode(&KeyDerivation)`、`decode(&[u8], &KeyDerivation)` | Action 帧帧体（Category 起）；格式必须是明文或协议对应的加密方式 |
+| `AdvertiseFormat` | `Plain`/`AesCtr`/`AesGcm`、`encrypted_for(Protocol)` | 协议 1 用 CTR，其余用 GCM |
+| `ChallengeRequest` / `ChallengeResponse` | `encode(key)`、`decode(&[u8], key)` | 0x300 / 0x100 字节，HMAC-SHA256 签名；key 取 `KeyDerivation::challenge_key(dev)` |
+| `AuthenticationFrame` + `AuthPayload::{Request, Response}` | `encode(&KeyDerivation)`、`decode(&[u8], &KeyDerivation)` | 协议 3 用 `client_random` 派生密钥做 AES-GCM；载荷里的 `challenge` 是已签名的挑战字节 |
+| `DisconnectFrame` | `encode()`、`decode()` | 原因码见 `auth::disconnect` |
+| `NetworkInfo` | `new(Protocol)`、`network_id()`、`is_same_network`、`update_from_advertisement`、`to_advertisement` | 扫描结果 / 主机状态 |
+| `Error` | `Wire`/`Crypto`/`NotLdnFrame`/`Invalid`/`TooLong`/`IntegrityCheckFailed` | GCM tag、SHA-256、HMAC 失败统一为 `IntegrityCheckFailed` |
 
 ## ldn-netlink 主要接口
 
