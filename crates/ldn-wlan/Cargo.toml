@@ -1,0 +1,21 @@
+[package]
+name = "ldn-wlan"
+description = "tokio-based WLAN interfaces for LDN: nl80211/rtnetlink sockets, monitor, TAP, station and access point."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ldn-wire.workspace = true
+ldn-netlink.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
+libc.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros", "test-util"] }
+
+[lints]
+workspace = true
