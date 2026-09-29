@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ldn-wire", "crates/ldn-crypto", "crates/ldn-proto", "crates/ldn-netlink", "crates/ldn-wlan"]
+members = ["crates/ldn-wire", "crates/ldn-crypto", "crates/ldn-proto", "crates/ldn-netlink", "crates/ldn-wlan", "crates/ldn"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +14,7 @@ ldn-wire = { path = "crates/ldn-wire" }
 ldn-netlink = { path = "crates/ldn-netlink" }
 ldn-crypto = { path = "crates/ldn-crypto" }
 ldn-proto = { path = "crates/ldn-proto" }
+ldn-wlan = { path = "crates/ldn-wlan" }
 # 第三方依赖一律钉死版本，升级时显式改这里。
 tokio = { version = "=1.53.1", default-features = false }
 libc = "=0.2.189"

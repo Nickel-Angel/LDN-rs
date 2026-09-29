@@ -485,6 +485,35 @@ impl Station {
             .map(drop)
     }
 
+    /// 给 STA 接口添加 IPv4 地址（/24）。STA 模式下数据帧由内核直接收发，不需要 TAP。
+    pub async fn add_address(&self, local: Ipv4Addr, broadcast: Ipv4Addr) -> Result<()> {
+        self.iface
+            .route
+            .request(&rtnl::add_ipv4_address(
+                self.iface.ifindex,
+                local,
+                broadcast,
+                24,
+            ))
+            .await
+    }
+
+    /// 添加永久邻居。
+    pub async fn add_neighbor(&self, ip: Ipv4Addr, mac: MacAddress) -> Result<()> {
+        self.iface
+            .route
+            .request(&rtnl::add_neighbor(self.iface.ifindex, ip, mac))
+            .await
+    }
+
+    /// 删除邻居。
+    pub async fn remove_neighbor(&self, ip: Ipv4Addr, mac: MacAddress) -> Result<()> {
+        self.iface
+            .route
+            .request(&rtnl::remove_neighbor(self.iface.ifindex, ip, mac))
+            .await
+    }
+
     /// 断开并删除接口。断开失败时仍然删除接口，并返回第一个错误。
     pub async fn close(self) -> Result<()> {
         let disconnect = self

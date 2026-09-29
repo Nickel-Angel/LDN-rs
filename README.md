@@ -15,18 +15,23 @@ LDN-rs/
 │   ├── ldn-proto/             阶段 3：广播帧、挑战、LDN 认证帧、断开帧、NetworkInfo，无 I/O
 │   ├── ldn-netlink/           阶段 4a：netlink / genl / nl80211 / rtnetlink 编解码，无 I/O
 │   │   └── src/{message,nla,genl,nl80211,rtnl}.rs
-│   └── ldn-wlan/              阶段 4b：tokio I/O 层
+│   ├── ldn-wlan/              阶段 4b：tokio I/O 层
 │       └── src/
 │           ├── sys.rs         全部系统调用（workspace 里唯一的 unsafe）
 │           ├── netlink.rs     异步 netlink socket：按序号分发回复、通知入事件队列
 │           ├── client.rs      Nl80211（family 解析、mlme 组播）、Route
 │           ├── ap.rs          AP 管理帧状态机（sans-IO）
 │           └── interface.rs   Factory、Monitor、Tap、Station、AccessPoint
+│   └── ldn/                   阶段 5：对外 API（scan / connect / create_network）
+│       ├── src/{host_core,station_core}.rs  建房 / 加入的协议状态机（sans-IO）
+│       ├── src/{host,station,scan}.rs       把状态机接到 ldn-wlan 接口上的 tokio 驱动
+│       └── examples/{scan,join,host}.rs     对应 Python 版 examples/
 └── tools/
     ├── gen_python_vectors.py  帧编解码对拍向量
     ├── gen_netlink_vectors.py 驱动 wlan.py 真实代码路径，截获它发出的 netlink 消息
     ├── gen_crypto_vectors.py  用假系统密钥调用 Python 的派生与加密方法
     ├── gen_proto_vectors.py   用假系统密钥调用 Python 的协议类编码各类 LDN 帧
+    ├── gen_ldn_vectors.py     用假接口驱动 APNetwork / STANetwork，截获握手、广播和数据面字节
     └── requirements.txt
 ```
 
@@ -47,6 +52,7 @@ python3 -m venv .venv
 .venv/bin/python tools/gen_netlink_vectors.py ../LDN
 .venv/bin/python tools/gen_crypto_vectors.py ../LDN
 .venv/bin/python tools/gen_proto_vectors.py ../LDN
+.venv/bin/python tools/gen_ldn_vectors.py ../LDN
 ```
 
 对拍向量的生成脚本和各 `tests/*parity*.rs` 里的输入必须逐字段一致，改一边就要改另一边。
@@ -60,7 +66,7 @@ python3 -m venv .venv
 | 2 ✅ | `ldn-crypto` | `load_keys`、`KeyDerivation`、CCMP 加解密、广播帧 AES-CTR/GCM、认证帧 AES-GCM、挑战 HMAC | 协议 1/3 两套假密钥对拍 + CCMP 双向对拍 + 篡改/边界单测 |
 | 3 ✅ | `ldn-proto` | `NetworkId`、`NetworkInfo`、`AdvertisementFrame`（V1/V2 载荷，明文/CTR/GCM）、`Challenge*`、LDN `AuthenticationFrame`、`DisconnectFrame` | 18 组对拍（广播帧 4 种、认证帧 8 种）双向 + 篡改/边界单测 |
 | 4 ✅ | `ldn-netlink` + `ldn-wlan` | `wlan.py` 的 `Factory`/`Monitor`/`Tap`/`Station`/`AccessPoint` 与 python-netlink | 33 条 netlink 消息逐字节对拍；AP 状态机单测 + 对拍；真实内核 netlink 测试；硬件测试 `#[ignore]` |
-| 5 | `ldn` | `Scanner`、`STANetwork`、`APNetwork` 与 `scan`/`connect`/`create_network` | sans-IO 状态机单测；真机联调 Switch |
+| 5 ✅ | `ldn` | `Scanner`、`STANetwork`、`APNetwork` 与 `scan`/`connect`/`create_network`、示例 | 协议 1/3 完整场景（建房→认证加入→拒绝→收发数据→踢人）逐字节对拍；真机联调 Switch **未做** |
 
 ## 已定的设计
 
@@ -86,6 +92,11 @@ python3 -m venv .venv
 - `ChallengeRequest` 解码按 64 项读取 params2（Python 只读 8 项，但编码写满 64 项）；参数个数超限报错。
 - LDN 认证帧是否加密统一由格式字段决定（Python 格式看“协议 == 1”、加密看“协议 == 3”，协议 1/3 以外会不一致）。
 - 名字、用户名超过 32 字节时报错（Python 会写出超长字段破坏帧格式）。
+- 主机：已登记的成员重发认证请求时沿用原槽位、不重复 `Join`（Python 会重复登记）；8 个槽位全满回 `DENIED_BY_POLICY`（Python 覆盖 7 号槽位）；不允许踢 0 号主机自己。
+- 主机：成员的静态邻居加删在 TAP 接口上（Python 加在 AP 接口上，但成员的 IP 流量走 TAP）。
+- 成员：比较参与者槽位时同时看 `connected` 和 MAC。协议 1 的 V1 广播帧成员离开后保留原 MAC，Python 只比 MAC，永远报不出 `Leave`。
+- 成员：认证后收到格式不对的 control port 帧时忽略（Python 按断开帧解析，失败即终止）。
+- 建房四个后台循环任一出错时取消其余循环，错误从 `next_event()` 返回（对应 trio nursery 语义）。
 - 同 ID 的 IE 出现多次时仍只保留最后一个，与 Python 版一致；这不符合 802.11（221 可以出现多次），等到需要解析 Vendor IE 时再改成 `Vec`。
 
 ## ldn-wire 主要接口
@@ -103,6 +114,20 @@ python3 -m venv .venv
 | `frame::Frame` | `parse(&[u8]) -> Result<Option<Frame>>`、`encode()` | monitor 口的帧分发；不认识的类型返回 `None` |
 | `data::DataFrame` | `encode()`、`decode()`、`ccmp_nonce() -> [u8;13]`、`ccmp_aad() -> [u8;22]` | 受保护帧只处理 CCMP 头，加解密由阶段 2 完成 |
 | `data::{SnapHeader, EthernetFrame}` | `encode()`、`decode()` | 数据面与 TAP 口的格式转换 |
+
+## ldn 主要接口
+
+| 类型 / 函数 | 说明 |
+|---|---|
+| `scan(&ScanParam) -> Vec<NetworkInfo>` | `ScanParam::new(keys)`：`phy0`、信道 1/6/11、每信道 110ms、协议 1+3 |
+| `connect(ConnectParam) -> StaNetwork` | `ConnectParam::new(keys, network)`，`param.join` 里填密码、用户名等；返回时已认证、已分配 IP、已加邻居 |
+| `StaNetwork` | `info()`、`participant()`、`broadcast_ip()`、`next_event() -> Event`、`close()` |
+| `create_network(CreateNetworkParam) -> HostNetwork` | `CreateNetworkParam::new(keys, HostConfig::new(protocol))`；SSID/信道/主机随机数默认随机 |
+| `HostNetwork` | `info()`、`broadcast_ip()`、`set_application_data`、`set_accept_policy`、`set_accept_filter`、`kick(index)`、`next_event()`、`close()` |
+| `Event` | `Disconnected`、`Join`、`Leave`、`ApplicationDataChanged`、`AcceptPolicyChanged` |
+| `host_core::HostCore` | `handle_auth_request`、`handle_disassociation`、`kick`、`destroy_frames`、`advertisement_frame`、`handle_data_frame`、`build_data_frame` |
+| `station_core::StationCore` | `authentication_request`、`check_authentication_response`、`parse_advertisement`、`try_initialize`、`update`、`parse_disconnect`、`data_key` |
+| `Error` | `Wlan`/`Proto`/`Crypto`/`Wire`/`InvalidParam`/`AuthenticationRejected(status)`/`AuthenticationTimeout`/`Connection` |
 
 ## ldn-crypto 主要接口
 
